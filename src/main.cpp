@@ -1,51 +1,94 @@
+#include "Camera.hpp"
 #include <iostream>
-#include "MvCameraControl.h"//SDK附带的头文件
 
-int main()
+// 前提：SDK 已经初始化成功。
+int runCameraDemo()//便于看清生命周期
 {
-    //程序启动，初始化SDK
-    int ret = MV_CC_Initialize();
-    //此处没有按照文档，借助ai在此处判断相机初始化是否成功
+    // 创建空对象
+    Camera camera;
 
-    if (ret != MV_OK)//若初始化失败，输出错误信息 
+    std::cout << "Initial open state: "
+              << camera.isOpen() << '\n';
+
+    // 枚举设备
+    MV_CC_DEVICE_INFO_LIST devices{};
+
+    const int ret = MV_CC_EnumDevices(
+        MV_GIGE_DEVICE | MV_USB_DEVICE,
+        &devices//GigE相机和USB相机
+    );
+
+    if (ret != MV_OK) 
     {
-        std::cerr << "Initialize failed: 0x"
-                  << std::hex << ret << '\n';//改输出成十六进制
+        std::cerr << "EnumDevices failed: 0x"
+                  << std::hex << ret << '\n';
         return 1;
     }
 
-    std::cout << "SDK initialized.\n";//显示SDK已初始化
+    std::cout << "Detected cameras: "
+              << devices.nDeviceNum << '\n';
 
-    // 初始化变量来接收设备列表
-    MV_CC_DEVICE_INFO_LIST devices{};
+    if (devices.nDeviceNum == 0)
+    {
+    std::cout << "No camera connected.\n";
+    return 0;
+    }	
 
-    //获取设备列表
-    ret = MV_CC_EnumDevices(
-        MV_GIGE_DEVICE | MV_USB_DEVICE,//GigE和USB相机
-        &devices//存放设备列表
-    );
+    const MV_CC_DEVICE_INFO* info = devices.pDeviceInfo[0];
 
-    int exit_code = 0;
-
-    if (ret != MV_OK) {//检测枚举情况
-        std::cerr << "EnumDevices failed: 0x"
-                  << std::hex << ret << '\n';
-        exit_code = 1;
-    } else {
-        std::cout << "Detected cameras: "
-                  << devices.nDeviceNum << '\n';
+    if (info == nullptr) {
+        std::cerr << "Device information is null.\n";
+        return 1;
     }
 
-    // 反初始化SDK，释放SDK资源
-    const int cleanup_ret = MV_CC_Finalize();
+    // info 是指针，*info 表示它指向的设备信息对象。
+    // open() 接收的是该对象的 const 引用。
+    if (!camera.open(*info)) {
+        return 1;
+    }
 
-    if (cleanup_ret != MV_OK) {
+    std::cout << "Camera opened.\n";
+
+    // 显式关闭，让主程序能够检查清理是否出现错误。
+    if (!camera.close()) {
+        return 1;
+    }
+
+    std::cout << "Camera closed.\n";
+    return 0;
+
+    // 从本函数任何位置 return，局部对象 camera 都会析构.
+}
+
+int main()
+{
+    // SDK 是整个程序使用的基础资源，先初始化。
+    const int init_ret = MV_CC_Initialize();
+
+    if (init_ret != MV_OK) {
+        std::cerr << "Initialize failed: 0x"
+                  << std::hex << init_ret << '\n';
+        return 1;
+    }
+
+    std::cout << "SDK initialized.\n";
+
+    // 函数内部创建 Camera；函数返回时，它已经析构。
+    const int exit_code = runCameraDemo();
+
+    // 先完成 Camera 的清理，再结束 SDK。
+    std::cout << "Camera scope ended.\n";
+
+    const int final_ret = MV_CC_Finalize();
+
+    if (final_ret != MV_OK) {
         std::cerr << "Finalize failed: 0x"
-                  << std::hex << cleanup_ret << '\n';
-        exit_code = 1;
-    } else {
-        std::cout << "SDK finalized.\n";
+                  << std::hex << final_ret << '\n';
+        return 1;
     }
 
+    std::cout << "SDK finalized.\n";
+
+    // 保留相机操作阶段的成功或失败结果。
     return exit_code;
 }
