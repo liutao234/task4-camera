@@ -1,36 +1,71 @@
-#pragma once  // 避免这个头文件在同一次编译中被重复包含，造成重复定义
+#pragma once
 
 #include "MvCameraControl.h"
+#include <vector>
+
+// 创建一个Frame对象，用来接受图像
+struct Frame {
+    std::vector<unsigned char> data;
+
+    unsigned int width = 0;
+    unsigned int height = 0;
+    unsigned int pixel_type = 0;    // 相机输出的像素格式
+    unsigned int frame_number = 0;  // SDK 返回的帧号
+
+    // 清空上一次取图结果。
+    void clear() noexcept
+    {
+        data.clear();
+        width = height = pixel_type = frame_number = 0;
+    }
+};
+
+// 采用自己定义的返回状态来让调用者清楚了解本次read()的执行情况
+enum class ReadStatus {
+    Ok,      // 已取得并复制一帧，SDK 缓存也已归还
+    NoData,  // 本次等待没有拿到帧
+    Error    // 操作顺序、SDK 调用、复制或缓存归还出现错误
+};
 
 class Camera {
 public:
-    Camera() = default;//默认构造函数，以初始化对象
-
-    // 析构函数～Camera：对象销毁时自动执行，以释放资源
-    // noexcept 表示这个函数承诺不向外抛出 C++ 异常。防止终止程序
+    Camera() = default;
     ~Camera() noexcept;
 
-    Camera(const Camera&) = delete;//禁止复制构造
-    Camera& operator=(const Camera&) = delete;//禁止复制赋值
-    //保证一个句柄只由一个对象负责释放	
+    // 同一个句柄只能由一个 Camera 对象负责管理。
+    Camera(const Camera&) = delete;
+    Camera& operator=(const Camera&) = delete;
+    Camera(Camera&&) = delete;
+    Camera& operator=(Camera&&) = delete;
 
-    // 打开枚举得到的设备。
     bool open(const MV_CC_DEVICE_INFO& device_info);
-
-    // 关闭设备并销毁句柄。
     bool close() noexcept;
 
-    // 查询本对象记录的打开状态。
+    // 配置为连续、非触发采集，然后开始取流。
+    bool start();
+
+    // 停止采集
+    bool stop() noexcept;
+
+    // 获取一帧
+    // Error 后，调用者应结束本次采集并关闭相机。
+    ReadStatus read(Frame& out, unsigned int timeout_ms = 1000);
+
+    // 本对象记录的状态
     bool isOpen() const noexcept
     {
         return opened_;
     }
 
-private:
-    // SDK 返回的不透明句柄
-    // nullptr 表示当前没有持有句柄。
-    void* handle_ = nullptr;
+    bool isGrabbing() const noexcept
+    {
+        return grabbing_;
+    }
 
-    // 只有 OpenDevice 成功后才设为 true。
+private:
+    void* handle_ = nullptr;
     bool opened_ = false;
+
+    // 只有 StartGrabbing 成功后才设置为 true。
+    bool grabbing_ = false;
 };
