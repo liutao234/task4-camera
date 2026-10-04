@@ -1,6 +1,12 @@
 #include "Camera.hpp"
 #include <cstdio> 
 #include <exception>
+#include <opencv2/imgproc.hpp> //图像处理
+#include <cstdint> //指定位数的整数类型
+#include <stdexcept> //提供更具体的异常类型
+#include <cstring> //内存复制
+#include <limits> //查询数值范围
+#include <sstream> //将文字、数字等转换为字符串
 
 Camera::~Camera() noexcept
 {
@@ -46,7 +52,72 @@ bool Camera::open(const MV_CC_DEVICE_INFO& device_info)
 
     // 只有 SDK 确认打开成功，才更新状态。
     opened_ = true;
-    return true;
+
+    // USB 相机在打开后、开始采集前配置传输通道。
+    // 限制并发传输，验证当前虚拟 USB 控制器的兼容性。
+    if (device_info.nTLayerType == MV_USB_DEVICE) {
+        unsigned int original_ways = 0;
+        int usb_ret = MV_USB_GetTransferWays(handle_, &original_ways);
+        if (usb_ret != MV_OK) {
+            std::fprintf(stderr, "读取 USB 传输通道数失败，错误码：0x%08X\n",
+                         static_cast<unsigned int>(usb_ret));
+            close();
+            return false;
+        }
+
+        // SDK 允许 1～10 个通道；这里仅使用 1 个通道。
+        // 保持原传输块大小、分辨率和像素格式。
+        constexpr unsigned int transfer_ways = 1;
+        usb_ret = MV_USB_SetTransferWays(handle_, transfer_ways);
+        if (usb_ret != MV_OK) {
+            std::fprintf(stderr, "设置 USB 传输通道数失败，错误码：0x%08X\n",
+                         static_cast<unsigned int>(usb_ret));
+            close();
+            return false;
+        }
+
+        // 回读确认配置生效，不在配置失败时继续取图。
+        unsigned int actual_ways = 0;
+        usb_ret = MV_USB_GetTransferWays(handle_, &actual_ways);
+        if (usb_ret != MV_OK || actual_ways != transfer_ways) {
+            std::fprintf(stderr,
+                         "验证 USB 传输通道数失败，错误码：0x%08X，实际值：%u\n",
+                         static_cast<unsigned int>(usb_ret), actual_ways);
+            close();
+            return false;
+        }
+
+        std::fprintf(stderr, "USB 传输通道数：%u → %u。\n",
+                     original_ways, actual_ways);
+    }
+
+    // 为GigE相机设置网络包大小，提升传输效率。
+    if (device_info.nTLayerType == MV_GIGE_DEVICE) {
+        int packet_size = MV_CC_GetOptimalPacketSize(handle_);
+
+        if (packet_size <= 0) {
+        std::fprintf(
+            stderr,
+            "Packet-size query failed: 0x%08X; trying 1500.\n",
+            static_cast<unsigned int>(packet_size));
+
+        packet_size = 1500;
+    }
+
+    const int packet_ret = MV_CC_SetIntValue(
+        handle_,
+        "GevSCPSPacketSize",
+        static_cast<unsigned int>(packet_size));
+
+    if (packet_ret != MV_OK) {
+        std::fprintf(
+            stderr,
+            "Warning: Set packet size failed: 0x%08X\n",
+            static_cast<unsigned int>(packet_ret));
+    }
+}
+
+return true;
 }
 
 bool Camera::close() noexcept
@@ -261,4 +332,123 @@ ReadStatus Camera::read(Frame& out, unsigned int timeout_ms)
     }
 
     return result;//清空输出帧内容
+}
+
+cv::Mat Camera::toBgr(Frame& frame)
+{
+    // SDK 的转换接口需要相机句柄，所以转换应在 close() 之前完成。
+    if (!opened_) {
+        throw std::runtime_error("toBgr(): camera is not open");
+    }
+
+    const auto max_int =//获取int类型的最大值
+        static_cast<unsigned int>(std::numeric_limits<int>::max());
+
+    const auto max_uint =//将刚刚int转换成unsigned int以获取unsigned int类型的最大值
+        std::numeric_limits<unsigned int>::max();
+
+    // OpenCV 的行数、列数使用 int。
+    // SDK 转换接口的数据长度使用 unsigned int。
+    if (frame.width == 0 || frame.height == 0 || frame.data.empty() ||
+        frame.width > max_int || frame.height > max_int ||
+        frame.data.size() > max_uint) {
+        throw std::runtime_error(
+            "Invalid frame dimensions or data length");
+    }
+
+    // Bayer 是彩色格式，不能当作普通灰度图处理。
+    bool mono = false;//标记是否是灰度图像
+
+    switch (frame.pixel_type) {
+    case PixelType_Gvsp_Mono8:
+    case PixelType_Gvsp_Mono10:
+    case PixelType_Gvsp_Mono10_Packed:
+    case PixelType_Gvsp_Mono12:
+    case PixelType_Gvsp_Mono12_Packed:
+    case PixelType_Gvsp_Mono16:
+        mono = true;//匹配到上述灰度图像格式，设置mono为true
+        break;
+
+    default:
+        break;
+    }
+
+    // 先使用 64 位整数计算像素数，再检查目标缓存的大小。
+    const std::uint64_t pixels =
+        static_cast<std::uint64_t>(frame.width) * frame.height;
+
+    if (pixels > max_uint / 3) {
+        throw std::runtime_error("Frame is too large");
+    }
+
+    // 黑白图先统一成 Mono8，彩色图统一成 BGR8。
+    const auto target =
+        mono ? PixelType_Gvsp_Mono8 : PixelType_Gvsp_BGR8_Packed;
+
+    const unsigned int bytes =
+        static_cast<unsigned int>(pixels * (mono ? 1 : 3));
+
+    // CV_8UC1：每个通道是 8 位无符号整数，1 个通道。
+    // CV_8UC3：每个通道是 8 位无符号整数，3 个通道。
+    // 分配图像内存
+    cv::Mat converted(
+        static_cast<int>(frame.height),
+        static_cast<int>(frame.width),
+        mono ? CV_8UC1 : CV_8UC3); //根据mono选择像素类型
+
+    if (frame.pixel_type == static_cast<unsigned int>(target)) {
+        // 判断输入帧的像素格式是否已经与目标格式相同
+        if (frame.data.size() != bytes) {
+            throw std::runtime_error("Unsupported frame layout");
+        }
+        std::memcpy(converted.data, frame.data.data(), bytes);// 复制到 Mat 自己的内存，不借用 frame.data 的指针。
+    } else {
+        // 初始化结构体中的各个字段，传给 SDK 的转换接口。
+        MV_CC_PIXEL_CONVERT_PARAM_EX parameter{};
+
+        parameter.nWidth = frame.width;
+        parameter.nHeight = frame.height;
+
+        // 输入信息：原始格式、原始数据地址、原始数据长度。
+        parameter.enSrcPixelType =
+            static_cast<MvGvspPixelType>(frame.pixel_type);
+
+        parameter.pSrcData = frame.data.data();
+        parameter.nSrcDataLen =
+            static_cast<unsigned int>(frame.data.size());
+
+        // 输出信息：目标格式、目标缓存地址、缓存容量。
+        parameter.enDstPixelType = target;
+        parameter.pDstBuffer = converted.data;
+        parameter.nDstBufferSize = bytes;
+
+        const int ret =
+            MV_CC_ConvertPixelTypeEx(handle_, &parameter);
+
+        if (ret != MV_OK) {
+            std::ostringstream message;
+
+            message << "ConvertPixelTypeEx failed: 0x"
+                    << std::hex << static_cast<unsigned int>(ret)
+                    << ", source pixel type: 0x"
+                    << frame.pixel_type;
+
+            throw std::runtime_error(message.str());
+        }
+
+        // SDK 成功返回后，还要核对实际写入的数据长度。
+        if (parameter.nDstLen != bytes) {
+            throw std::runtime_error(
+                "Unexpected converted image length");
+        }
+    }
+
+    if (mono) {
+        // 灰度图扩展为三通道，让函数统一返回 BGR 图像。
+        cv::Mat bgr;
+        cv::cvtColor(converted, bgr, cv::COLOR_GRAY2BGR);
+        return bgr;
+    }
+
+    return converted;
 }

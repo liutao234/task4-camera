@@ -2,6 +2,7 @@
 
 #include "MvCameraControl.h"
 #include <vector>
+#include <opencv2/core.hpp>
 
 // 创建一个Frame对象，用来接受图像
 struct Frame {
@@ -50,6 +51,10 @@ public:
     // 获取一帧
     // Error 后，调用者应结束本次采集并关闭相机。
     ReadStatus read(Frame& out, unsigned int timeout_ms = 1000);
+
+    // 相机打开期间，将原始帧转换为独立拥有数据的 BGR 图像。
+    // 转换失败会抛出异常，由 main 捕获。
+    cv::Mat toBgr(Frame& frame);
 
     // 本对象记录的状态
     bool isOpen() const noexcept
