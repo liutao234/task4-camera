@@ -10,6 +10,63 @@
 
 #include <opencv2/imgproc.hpp>
 
+bool Camera::initialize() noexcept //封装之前没有封装进来的初始化函数
+{
+    const int ret = MV_CC_Initialize();
+
+    if (ret != MV_OK)
+    {
+        std::fprintf(
+            stderr,
+            "初始化相机 SDK 失败，错误码: 0x%08X\n",
+            static_cast<unsigned int>(ret)
+        );
+        return false;
+    }
+
+    return true;
+}
+
+bool Camera::finalize() noexcept //封装之前没有封装进来的释放函数
+{
+    const int ret = MV_CC_Finalize();
+
+    if (ret != MV_OK)
+    {
+        std::fprintf(
+            stderr,
+            "释放相机 SDK 资源失败，错误码: 0x%08X\n",
+            static_cast<unsigned int>(ret)
+        );
+        return false;
+    }
+
+    return true;
+}
+
+bool Camera::enumerate_devices(MV_CC_DEVICE_INFO_LIST& devices) noexcept //检查发现枚举相机也没有封装进来，本次封装进来
+{
+    devices = {};
+
+    const int ret = MV_CC_EnumDevices(
+        MV_GIGE_DEVICE | MV_USB_DEVICE,
+        &devices
+    );
+
+    if (ret != MV_OK)
+    {
+        std::fprintf(
+            stderr,
+            "枚举相机失败，错误码: 0x%08X\n",
+            static_cast<unsigned int>(ret)
+        );
+        devices = {};
+        return false;
+    }
+
+    return true;
+}
+
 Camera::~Camera() noexcept
 {
     // 析构函数不能返回清理结果；通过显式调用 close() 来检查返回值。
@@ -18,7 +75,7 @@ Camera::~Camera() noexcept
 
 bool Camera::open(const MV_CC_DEVICE_INFO& device_info)
 {
-    // 防止覆盖旧句柄。
+    // 检查以防止覆盖旧句柄。
     if (m_handle != nullptr)
     {
         std::fprintf(
@@ -60,7 +117,7 @@ bool Camera::open(const MV_CC_DEVICE_INFO& device_info)
     m_opened = true;
 
     // 相机在开始采集前配置传输通道。
-    if (device_info.nTLayerType == MV_USB_DEVICE)
+    if (device_info.nTLayerType == MV_USB_DEVICE) //nTLayerType属于设备信息对象 device_info，表示设备传输协议
     {
         unsigned int original_ways = 0;
         int usb_ret = MV_USB_GetTransferWays(m_handle, &original_ways);
@@ -69,21 +126,22 @@ bool Camera::open(const MV_CC_DEVICE_INFO& device_info)
             std::fprintf(
                 stderr,
                 "读取 USB 传输通道数失败，错误码:0x%08X\n",
-                static_cast<unsigned int>(usb_ret)
+                static_cast<unsigned int>(usb_ret) 
+                //static_cast用于转换类型，将usb_ret转换为unsigned int类型，以便在fprintf中正确输出十六进制格式
             );
             close();
             return false;
         }
 
         // 保持原传输块大小、分辨率和像素格式。
-        constexpr unsigned int transfer_ways = 1;
+        constexpr unsigned int transfer_ways = 1; //constexpr用于声明一个编译期常量，表示USB传输通道数为1，通道数在编译时即可确定
         usb_ret = MV_USB_SetTransferWays(m_handle, transfer_ways);
         if (usb_ret != MV_OK)
         {
             std::fprintf(
                 stderr,
                 "设置 USB 传输通道数失败，错误码:0x%08X\n",
-                static_cast<unsigned int>(usb_ret)
+                static_cast<unsigned int>(usb_ret) 
             );
             close();
             return false;
@@ -128,7 +186,7 @@ bool Camera::open(const MV_CC_DEVICE_INFO& device_info)
             packet_size = 1500;
         }
 
-        const int packet_ret = MV_CC_SetIntValue(
+        const int packet_ret = MV_CC_SetIntValue( //设置数据包大小
             m_handle,
             "GevSCPSPacketSize", //流通道数据包大小
             static_cast<unsigned int>(packet_size)
@@ -173,7 +231,7 @@ bool Camera::close() noexcept
         else
         {
             m_opened = false;
-            m_grabbing = false; // 设备已关闭，状态改变。
+            m_grabbing = false; // 设备已关闭，因此在此处改变状态。
         }
     }
 
@@ -300,11 +358,11 @@ ReadStatus Camera::read(Frame& out, unsigned int timeout_ms)
     }
 
     // 用于接收 SDK 返回的缓存地址及帧信息。
-    MV_FRAME_OUT sdk_frame{};
+    MV_FRAME_OUT sdk_frame{}; //初始化 sdk_frame 结构体，{}表示使用默认构造函数进行初始化
 
-    const int ret = MV_CC_GetImageBuffer(
+    const int ret = MV_CC_GetImageBuffer( //获取图像缓存
         m_handle,
-        &sdk_frame,
+        &sdk_frame, //接收结果的结构体指针
         timeout_ms
     );
 
@@ -343,7 +401,7 @@ ReadStatus Camera::read(Frame& out, unsigned int timeout_ms)
         try
         {
             // pBufAddr 指向 SDK 的缓存；先复制到 Frame 自己拥有的内存中。
-            // assign() 的范围是 [首地址, 尾后地址)，不包含尾后地址。
+            // assign() 的范围是 [首地址, 尾后地址)，不包含尾后地址，用于抛出异常。
             out.m_data.assign(
                 sdk_frame.pBufAddr,
                 sdk_frame.pBufAddr + info.nFrameLen
@@ -455,10 +513,10 @@ cv::Mat Camera::to_bgr(Frame& frame)
     // CV_8UC1：每个通道是 8 位无符号整数，1 个通道。
     // CV_8UC3：每个通道是 8 位无符号整数，3 个通道。
     // 根据 mono 分配目标图像的内存。
-    cv::Mat converted(
+    cv::Mat converted( //创建OpenCV的Mat对象，存储转换后的图像数据
         static_cast<int>(frame.m_height),
         static_cast<int>(frame.m_width),
-        mono ? CV_8UC1 : CV_8UC3
+        mono ? CV_8UC1 : CV_8UC3 //？表示条件成立时的值 : 条件不成立时的值
     );
 
     if (frame.m_pixel_type == static_cast<unsigned int>(target))
@@ -469,38 +527,37 @@ cv::Mat Camera::to_bgr(Frame& frame)
             throw std::runtime_error("Unsupported frame layout");
         }
 
-        // 复制到 Mat 自己的内存，不借用 Frame 内部的指针。
-        std::memcpy(converted.data, frame.m_data.data(), bytes);
+        //从 Frame 保存的图像数据中，复制 bytes 个字节到 converted 的图像内存中。
+        std::memcpy(converted.data, frame.m_data.data(), bytes);//调用data()函数取得内部数组的起始地址
     }
     else
     {
         // 初始化结构体中的各个字段，传给 SDK 的转换接口。
-        MV_CC_PIXEL_CONVERT_PARAM_EX parameter{};
+        MV_CC_PIXEL_CONVERT_PARAM_EX parameter{}; //初始化结构体，用于转换像素格式
 
         parameter.nWidth = frame.m_width;
         parameter.nHeight = frame.m_height;
 
         // 输入信息：原始格式、原始数据地址、原始数据长度。
-        parameter.enSrcPixelType =
+        parameter.enSrcPixelType = //将像素格式写入参数结构体，用于指定输入图像的像素格式。
             static_cast<MvGvspPixelType>(frame.m_pixel_type);
 
-        parameter.pSrcData = frame.m_data.data();
+        parameter.pSrcData = frame.m_data.data(); //把地址保存到 pSrcData
         parameter.nSrcDataLen =
-            static_cast<unsigned int>(frame.m_data.size());
+            static_cast<unsigned int>(frame.m_data.size()); //原始图像总字节数
 
-        // 输出信息：目标格式、目标缓存地址、缓存容量。
-        parameter.enDstPixelType = target;
-        parameter.pDstBuffer = converted.data;
-        parameter.nDstBufferSize = bytes;
+        parameter.enDstPixelType = target; //目标像素格式
+        parameter.pDstBuffer = converted.data; //目标图像的缓存地址
+        parameter.nDstBufferSize = bytes; //目标图像缓存的容量，单位为字节
 
         const int ret = MV_CC_ConvertPixelTypeEx(m_handle, &parameter);
 
         if (ret != MV_OK)
         {
-            std::ostringstream message{};
+            std::ostringstream message{}; //输出字符串流，创建名为 message 的字符串流，初始内容为空
 
             message << "ConvertPixelTypeEx failed: 0x"
-                    << std::hex << static_cast<unsigned int>(ret)
+                    << std::hex << static_cast<unsigned int>(ret) //hex十六进制
                     << ", source pixel type: 0x"
                     << frame.m_pixel_type;
 

@@ -21,7 +21,7 @@ void on_signal(int)
 
 void save_image(const cv::Mat& image, unsigned int frame_number)
 {
-    // 保存失败时报告错误，然后继续预览。
+    // 捕获创建目录、生成文件名、写入图像等可能抛出的异常，避免程序崩溃。
     try
     {
         std::filesystem::create_directories("output");
@@ -62,16 +62,8 @@ int run_preview()
     Camera camera{};
     MV_CC_DEVICE_INFO_LIST devices{};
 
-    const int ret = MV_CC_EnumDevices(
-        MV_GIGE_DEVICE | MV_USB_DEVICE,
-        &devices
-    );
-
-    if (ret != MV_OK)
+    if (!Camera::enumerate_devices(devices))
     {
-        std::cerr << "枚举相机失败，错误码：0x" << std::hex
-                  << static_cast<unsigned int>(ret)
-                  << std::dec << '\n';
         return 1;
     }
 
@@ -92,9 +84,9 @@ int run_preview()
         return 1; // 局部 Camera 对象析构时仍会执行清理。
     }
 
-    using Clock = std::chrono::steady_clock;
-    auto last_frame_time = Clock::now();
-    cv::namedWindow("Camera", cv::WINDOW_NORMAL);
+    using Clock = std::chrono::steady_clock; //chrono：处理时间的命名空间
+    auto last_frame_time = Clock::now(); //获取当前时间点，记录最后一帧图像到达的时间
+    cv::namedWindow("Camera", cv::WINDOW_NORMAL); //创建一个名为 "Camera" 的窗口，cv::WINDOW_NORMAL 表示允许用户调整窗口大小。
     cv::setWindowTitle(
         "Camera",
         "相机预览 | 等待首帧 | q 或 Esc：退出"
@@ -155,10 +147,9 @@ int run_preview()
             break;
         }
 
-        // 某些窗口后端不支持这个查询，会返回负数。
-        // 不能把负数当成“窗口已关闭”，否则程序会立即退出。
         const double visible =
-            cv::getWindowProperty("Camera", cv::WND_PROP_VISIBLE);
+            cv::getWindowProperty("Camera", cv::WND_PROP_VISIBLE); 
+            //查询窗口是否可见，返回值为 1.0 表示可见，0.0 表示不可见，负数表示不支持查询。
 
         if (visible == 0.0)
         {
@@ -178,7 +169,7 @@ int run_preview()
 
         // 根据实际经过的时间判断是否持续没有有效图像。
         if (status != ReadStatus::Ok &&
-            elapsed >= std::chrono::seconds(10))
+            elapsed >= std::chrono::seconds(10)) //判断时间间隔是否达到10秒
         {
             throw std::runtime_error(
                 "连续 10 秒未收到有效图像，请检查相机连接和采集设置"
@@ -216,21 +207,16 @@ int main()
         return 1;
     }
 
-    const int init_ret = MV_CC_Initialize();
-
-    if (init_ret != MV_OK)
+    if (!Camera::initialize())
     {
-        std::cerr << "初始化相机 SDK 失败，错误码：0x" << std::hex
-                  << static_cast<unsigned int>(init_ret)
-                  << std::dec << '\n'
-                  << "下一步：检查 SDK 环境后，在终端输入 "
+        std::cerr << "下一步：检查 SDK 环境后，在终端输入 "
                      "./build/camera，再按回车重新运行。\n";
         return 1;
     }
 
     int exit_code = 0;
 
-    try
+    try //捕获预览过程中向外抛出的异常
     {
         exit_code = run_preview();
     }
@@ -242,7 +228,7 @@ int main()
     }
 
     // 窗口清理失败时仍继续执行 SDK 清理。
-    try
+    try //捕获关闭窗口可能抛出的异常
     {
         cv::destroyAllWindows();
     }
@@ -252,13 +238,9 @@ int main()
         exit_code = 1;
     }
 
-    const int final_ret = MV_CC_Finalize();
-
-    if (final_ret != MV_OK)
+    // run_preview() 已结束，其中的 Camera 对象也已析构。
+    if (!Camera::finalize())
     {
-        std::cerr << "释放相机 SDK 资源失败，错误码：0x" << std::hex
-                  << static_cast<unsigned int>(final_ret)
-                  << std::dec << '\n';
         exit_code = 1;
     }
 
